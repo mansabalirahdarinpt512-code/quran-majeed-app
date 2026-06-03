@@ -1,0 +1,199 @@
+📋 REBUILD SPECIFICATION — Al-Quran Global Learning Hub
+STACK
+pnpm monorepo (workspace packages with @workspace/ prefix)
+Node.js 24, TypeScript 5.9 strict
+Frontend: React 18 + Vite + Tailwind CSS
+Fonts: Amiri (Arabic), Poppins (UI) via Google Fonts in index.html
+Speech: Web Speech API (SpeechRecognition)
+Audio: Mishary Alafasy word CDN + ayah CDN (both free, permanent)
+No backend, no database — pure frontend app
+FILE STRUCTURE
+artifacts/quran-hub/
+  src/
+    pages/HidayatPage.tsx        ← Page 1: Tajweed course
+    pages/SurahFatihaPage.tsx    ← Page 2: Practice
+    data/surahFatiha.ts          ← 29 words, audio URLs, match keys
+    data/translations.ts         ← 20-language strings
+    hooks/useSpeechRecognition.ts ← Web Speech API hook + audio functions
+    context/LanguageContext.tsx  ← Global language state
+    index.css                    ← blink-red, word-correct-anim, fonts
+    main.tsx                     ← App + Router (wouter)
+AUDIO SYSTEM (Mishary Alafasy — FREE CDNs only, NO browser TTS for wrong words)
+Word-level audio (wrong-word feedback):
+
+https://audio.qurancdn.com/wbw/001_001_001.mp3
+Format: surah(3)_ayah(3)_word(3).mp3 — all zero-padded.
+
+Surah 1 (Al-Fatiha) = 001
+ayah = word.verseNum padded to 3 digits
+word = word.wordInVerse padded to 3 digits
+playbackRate = 1.3 (slightly faster)
+If CDN fails → just resume silently (call afterAudio directly, NEVER use TTS for wrong)
+Full-ayah audio (Hafiz mode):
+
+https://cdn.islamic.network/quran/audio/128/ar.alafasy/{globalAyahNum}.mp3
+Surah Al-Fatiha global ayah numbers = 1–7.
+
+WORD DATA STRUCTURE (FatihaWord)
+interface FatihaWord {
+  id: number;             // 1–29, unique
+  arabic: string;         // Arabic text with full diacritics
+  ttsText: string;        // Isolated Arabic form for TTS fallback
+  transliteration: string;
+  meaning: string;        // English meaning
+  color: string;          // Unique hex color per word
+  verseNum: number;       // 1–7
+  wordInVerse: number;    // 1-based position within verse (for audio URL)
+  matchKeys: string[];    // Multiple Arabic + Latin phonetic variants
+}
+29 words across 7 verses:
+
+Verse 1: بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ (ids 1–4, wordInVerse 1–4)
+Verse 2: ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ (ids 5–8, wordInVerse 1–4)
+Verse 3: ٱلرَّحْمَٰنِ ٱلرَّحِيمِ (ids 9–10, wordInVerse 1–2)
+Verse 4: مَٰلِكِ يَوْمِ ٱلدِّينِ (ids 11–13, wordInVerse 1–3)
+Verse 5: إِيَّاكَ نَعْبُدُ وَإِيَّاكَ نَسْتَعِينُ (ids 14–17, wordInVerse 1–4)
+Verse 6: ٱهْدِنَا ٱلصِّرَٰطَ ٱلْمُسْتَقِيمَ (ids 18–20, wordInVerse 1–3)
+Verse 7: صِرَٰطَ ٱلَّذِينَ أَنْعَمْتَ عَلَيْهِمْ غَيْرِ ٱلْمَغْضُوبِ عَلَيْهِمْ وَلَا ٱلضَّآلِّينَ (ids 21–29, wordInVerse 1–9)
+Each word has 5–8 matchKeys covering Arabic variants (with/without diacritics) and Latin phonetic variants.
+
+WORD MATCHING ALGORITHM
+function normalizeArabic(text: string): string {
+  // 1. Strip all diacritics (harakat, shadda, etc.)
+  // 2. Normalize alef variants (أإآٱ → ا)
+  // 3. Normalize ta marbuta (ة → ه)
+  // 4. Collapse whitespace, lowercase
+}
+function checkWordMatch(spoken: string, word: FatihaWord): boolean {
+  // spoken may contain " | "-separated alternatives (from maxAlternatives=10)
+  // For each alternative:
+  //   ns = normalizeArabic(part), ls = part.toLowerCase()
+  //   For each matchKey:
+  //     nk = normalizeArabic(key), lk = key.toLowerCase()
+  //     if ns.length>=2 && nk.length>=2 && (ns.includes(nk) || nk.includes(ns)) → MATCH
+  //     if ls.length>=2 && lk.length>=2 && (ls.includes(lk) || lk.includes(ls)) → MATCH
+  //   Also check: first 3 chars of normalized arabic word as root prefix
+}
+REAL-TIME BATCH WORD DETECTION (batchAdvance)
+Called on every interim AND final speech result.
+
+1. startIdx = currentIdxRef.current
+2. While surahFatihaWords[endIdx] matches transcript: endIdx++
+3. If endIdx === startIdx → return (no match)
+4. currentIdxRef.current = endIdx  ← SYNCHRONOUS (next event targets next word)
+5. wrongSpokenRef.current.delete each matched word ID
+6. One batched setWordStates:
+   - words[startIdx..endIdx-1] → "correct"
+   - locked words at endIdx+ → "idle" (unlock)
+   - words[endIdx] → "active"
+7. setStatusMsg(t.correct)
+8. if endIdx >= 29 → setTimeout(setCompleted(true), 500)
+This enables fast readers: Chrome sends "بسم الله الرحمن الرحيم" as one interim → all 4 Bismillah words go green simultaneously.
+
+WORD STATE MACHINE
+States: idle | active | blinking | blue | correct | locked
+idle → active        when previous word becomes correct (batchAdvance)
+active → correct     when batchAdvance matches (from interim/final result)
+active → blinking    when silence timer fires (4000ms) = wrong detected
+blinking → blue      after Qari audio plays (afterAudio callback)
+blue → active        after resumeAfterSpeaking (processingRef=false)
+any(not correct) → locked   when wrong fires (lockFuture from wrong word forward)
+locked → idle        when batchAdvance marks a correct word (unlock all after)
+Visual per state:
+
+idle: color: word.color, opacity: 0.78
+active: color: word.color, textShadow: 0 0 22px {color}CC, transform: scale(1.12)
+correct: color: #1A7A4A, textShadow: green glow
+blue: color: #1565C0, textShadow: blue glow
+blinking: color: #C0392B, CSS class blink-red (infinite red flash animation)
+locked: color: rgba(140,140,140,0.18) — ghost text (use rgba NOT opacity so child 🔒 renders at full opacity) + absolute-positioned 🔒 emoji (fontSize:9, bottom:-4, centered)
+WRONG-WORD FEEDBACK FLOW
+Triggered ONLY by 4-second silence (onSilence callback). Never by speech events.
+
+handleWrong(word):
+  1. processingRef.current = true
+  2. lockFuture(word.id)   ← all words after this get "locked" + 🔒
+  3. setOne(word.id, "blinking")  ← red flash starts
+  4. pauseForSpeaking()    ← mic ignores input (does NOT abort mic)
+  5. if wrongSpokenRef.has(word.id):
+       ← Already spoke once. Blink 1.2s then:
+         setOne(word.id, "active"), processingRef=false, resumeAfterSpeaking()
+         return
+  6. wrongSpokenRef.add(word.id)
+  7. playWordAudio(getWordAudioUrl(word), afterAudio, afterAudio)
+     ← If CDN fails, afterAudio is called directly (NO TTS fallback)
+  afterAudio():
+    setOne(word.id, "blue")
+    setStatusMsg(t.tryAgain)
+    processingRef.current = false
+    resumeAfterSpeaking()
+First correct after wrong:
+batchAdvance calls wrongSpokenRef.current.delete(word.id) → flag cleared instantly. If wrong fires again on the next attempt, Qari speaks again (fresh attempt = fresh chance).
+
+MIC SYSTEM (NO RESTART BEEP)
+// pauseForSpeaking: DO NOT abort the mic — just ignore results
+pauseForSpeaking():
+  pausedRef.current = true
+  clearSilence()
+  setIsListening(false)
+  // Mic stays running — all onresult events early-return if pausedRef=true
+resumeAfterSpeaking():
+  setTimeout(450ms):
+    pausedRef.current = false
+    if recRef.current alive: armSilence()  ← just re-arm timer
+    else: doStart()  ← rare: recognition died while paused, restart
+onresult handler:
+  if (pausedRef.current) return  ← ignore Qari echo in mic
+suppressBeepOnce(): called ONLY on very first mic start (firstStartRef)
+  Uses AudioContext to prime Chrome's audio pipeline. Never called again.
+Web Speech API settings: continuous=true, interimResults=true, maxAlternatives=10, lang="ar-SA"
+
+TWO PRACTICE MODES
+Nadra (ایک لفظ)	Hafiz (پوری آیت)
+On silence	Play wrong word audio (Mishary)	Play full ayah audio (Mishary)
+Button label	t.modeNadra	t.modeHafiz
+Hint	t.modeNadraHint	t.modeHafizHint
+20 LANGUAGES (Translation interface)
+LangCode: ur ar en tr id fa fr es bn ms hi sw ru zh ha de pt it nl so
+
+Each language object has:
+
+dir, langName, flag, khatam, mic, arrow, title, h1, d1, h2, d2, h3, d3,
+btn, label, disclaimer, practiceTitle, micBtn, micOn, micListening,
+micPermission, surahTitle, correct, wrong, speaking, tryAgain,
+completed, completedMsg, restart, modeNadra, modeHafiz,
+modeNadraHint, modeHafizHint, ayahReading, forgot
+Default language: Urdu (ur). RTL: ur, ar, fa.
+
+CSS ANIMATIONS (index.css)
+@keyframes blink-red {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.1; }
+}
+.blink-red { animation: blink-red 0.5s infinite; }
+@keyframes word-correct {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+.word-correct-anim { animation: word-correct 0.3s ease; }
+@keyframes listening-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231,76,60,0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(231,76,60,0); }
+}
+Font imports: Amiri (Arabic, 400+700), Poppins (UI, 400+600).
+
+PAGE 1 — HidayatPage
+Language selector grid (20 languages with flags)
+Khatam-e-Nabuwwat declaration (in selected language)
+3 Tajweed rules: throat letters, heavy letters, madd (long vowels)
+"Practice Surah Al-Fatiha" button → navigate to /surah-fatiha
+PAGE 2 — SurahFatihaPage
+Header: ← back button + سورة الفاتحة + mic indicator
+Mode toggle buttons (before mic: full size with hint; during: compact)
+Progress bar (correct / 29)
+Verse display (RTL, dir="rtl", each word in relative-position wrapper)
+Verse number marker: ۝1 through ۝7 in gold
+Current word hint below (transliteration + English meaning)
+Completion screen: moon emoji + Arabic hamd + restart button
+End of specification. This covers every function, state, audio URL, matching algorithm, mic behavior, and visual detail needed to rebuild the app exactly.
